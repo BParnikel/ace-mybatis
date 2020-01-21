@@ -15,18 +15,20 @@ public class ChangeTask implements Callable<Integer> {
     private SqlSessionFactory sqlSessionFactory;
     private String statementName;
     private ParamsHolder params;
+    private ChunkConfig chunkConfig;
 
     ChangeTask(AceConfig config, ChangeFunction changeFunction, SqlSessionFactory sqlSessionFactory, String statementName,
-               ParamsHolder params) {
+               ParamsHolder params, ChunkConfig chunkConfig) {
         this.config = config;
         this.changeFunction = changeFunction;
         this.sqlSessionFactory = sqlSessionFactory;
         this.statementName = statementName;
         this.params = params;
+        this.chunkConfig = chunkConfig;
     }
 
     @Override
     public Integer call() throws Exception {
-        return ChangeHelper.applySingleCore(config, changeFunction, sqlSessionFactory, statementName, params);
+        return ChangeHelper.applySingleCore(config, changeFunction, sqlSessionFactory, statementName, params, chunkConfig);
     }
 }

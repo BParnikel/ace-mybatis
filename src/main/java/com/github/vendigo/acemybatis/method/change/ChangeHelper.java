@@ -3,39 +3,49 @@ package com.github.vendigo.acemybatis.method.change;
 import com.github.vendigo.acemybatis.config.AceConfig;
 import com.github.vendigo.acemybatis.parser.ParamsHolder;
 import com.github.vendigo.acemybatis.proxy.RuntimeExecutionException;
+import com.google.common.collect.Lists;
 import org.apache.ibatis.session.ExecutorType;
 import org.apache.ibatis.session.SqlSession;
 import org.apache.ibatis.session.SqlSessionFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import java.sql.Connection;
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 class ChangeHelper {
+    private static final Logger log = LoggerFactory.getLogger(ChangeHelper.class);
+
     private ChangeHelper() {
     }
 
-    private static final boolean AUTO_COMMIT_FALSE = false;
-
     static Integer applyInParallel(AceConfig config, ChangeFunction changeFunction,
                                    SqlSessionFactory sqlSessionFactory, String statementName,
-                                   ParamsHolder params) {
+                                   ParamsHolder params, ChunkConfig chunkConfig) {
         ExecutorService executorService = Executors.newFixedThreadPool(config.getThreadCount());
-        List<ParamsHolder> parts = divideOnParts(params, config.getThreadCount());
-        int result;
+        int result = 0;
 
         try {
-            result = IntStream.range(0, config.getThreadCount())
-                    .mapToObj((n) -> executorService.submit(new ChangeTask(config, changeFunction, sqlSessionFactory,
-                            statementName, parts.get(n))))
-                    .map(ChangeHelper::getFromFuture)
-                    .mapToInt(Integer::valueOf)
-                    .sum();
+            List<List<Object>> chunks = Lists.partition(params.getEntities(), config.getUpdateChunkSize());
+            List<Future<Integer>> tasks = chunks.stream()
+                    .map(chunk -> new ParamsHolder(chunk, params.getOtherParams()))
+                    .map(paramHolder -> new ChangeTask(config, changeFunction, sqlSessionFactory, statementName, paramHolder, chunkConfig))
+                    .map(executorService::submit)
+                    .collect(Collectors.toList());
+
+            for (Future<Integer> task : tasks) {
+                result += getFromFuture(task);
+            }
         } finally {
             executorService.shutdown();
         }
@@ -44,21 +54,27 @@ class ChangeHelper {
 
     static int applySingleCore(AceConfig config, ChangeFunction changeFunction,
                                SqlSessionFactory sqlSessionFactory, String statementName,
-                               ParamsHolder params) {
+                               ParamsHolder params, ChunkConfig chunkConfig) throws SQLException {
         int i = 0;
         List<Object> entities = params.getEntities();
         Map<String, Object> otherParams = params.getOtherParams();
 
-        try (SqlSession sqlSession = sqlSessionFactory.openSession(ExecutorType.BATCH, AUTO_COMMIT_FALSE)) {
+        try (SqlSession sqlSession = sqlSessionFactory.openSession(ExecutorType.BATCH)) {
+            Connection connection = sqlSession.getConnection();
+            connection.setAutoCommit(false);
             for (Object entity : entities) {
                 changeFunction.apply(sqlSession, statementName, formatParam(config, entity, otherParams));
                 i++;
                 if (i % config.getUpdateChunkSize() == 0) {
                     sqlSession.commit();
+                    connection.commit();
+                    log.info("Processed batch {}/{}", chunkConfig.getCurrentChunk(), chunkConfig.getTotalChunks());
                 }
             }
             if (i % config.getUpdateChunkSize() != 0) {
                 sqlSession.commit();
+                connection.commit();
+                log.info("Processed batch {}/{}", chunkConfig.getCurrentChunk(), chunkConfig.getTotalChunks());
             }
         }
         //In batch mode sqlSession returns incorrect number of affected rows. We presume that one call changes one row.
@@ -82,25 +98,6 @@ class ChangeHelper {
             param.put(config.getElementName(), entity);
             return param;
         }
-    }
-
-    static List<ParamsHolder> divideOnParts(ParamsHolder params, int partsCount) {
-        List<Object> entities = params.getEntities();
-
-        List<ParamsHolder> parts = new ArrayList<>();
-        int partSize = entities.size() / partsCount;
-        int left = 0;
-        int right = partSize;
-        for (int i = 0; i < partsCount; i++) {
-            List<Object> partOfEntities = entities.subList(left, right);
-            parts.add(new ParamsHolder(partOfEntities, params.getOtherParams()));
-            left = right;
-            right += partSize;
-            if (i == partsCount - 2) {
-                right = entities.size();
-            }
-        }
-        return parts;
     }
 
     private static Integer getFromFuture(Future<Integer> future) {

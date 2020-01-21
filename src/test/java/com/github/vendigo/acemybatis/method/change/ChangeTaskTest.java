@@ -10,6 +10,8 @@ import org.junit.runner.RunWith;
 import org.mockito.Mock;
 import org.mockito.runners.MockitoJUnitRunner;
 
+import java.sql.Connection;
+
 import static com.github.vendigo.acemybatis.method.change.TestUtils.createParamsHolder;
 import static org.mockito.Mockito.*;
 
@@ -19,6 +21,8 @@ public class ChangeTaskTest {
     private SqlSessionFactory sqlSessionFactory;
     @Mock
     private SqlSession sqlSession;
+    @Mock
+    private Connection connection;
 
     @Test
     public void do3CommitsWhen7By3() throws Exception {
@@ -39,9 +43,11 @@ public class ChangeTaskTest {
         AceConfig aceConfig = new AceConfig(chunkSize, 2);
 
         ParamsHolder paramsHolder = createParamsHolder(numberOfElements);
+        ChunkConfig chunkConfig = ChunkUtils.buildChunkConfig(numberOfElements, chunkSize);
         ChangeTask changeTask = new ChangeTask(aceConfig, (sqlSession, statementName, entity) -> {}, sqlSessionFactory,
-                "insert", paramsHolder);
-        when(sqlSessionFactory.openSession(ExecutorType.BATCH, false)).thenReturn(sqlSession);
+                "insert", paramsHolder, chunkConfig);
+        when(sqlSessionFactory.openSession(ExecutorType.BATCH)).thenReturn(sqlSession);
+        when(sqlSession.getConnection()).thenReturn(connection);
         changeTask.call();
         verify(sqlSession, times(expectedNumberOfCommits)).commit();
     }
